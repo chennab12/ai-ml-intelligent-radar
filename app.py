@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from time import perf_counter
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 from radar.config import SOURCES, TPM_KPIS
 from radar.engine import fetch_news, ideas, load_demo, trends
 
+APP_STARTED = perf_counter()
 st.set_page_config(page_title="AI/ML TPM Radar", page_icon="🧭", layout="wide")
 
 st.markdown("""
@@ -33,10 +34,15 @@ def get_data(use_live: bool, lookback: int):
     if use_live:
         data, failures = fetch_news(lookback)
         if not data.empty:
-            return data, failures, "Live"
-    return load_demo(), [], "Curated demo"
+            return data, failures, data.attrs.get("data_mode", "Live"), data.attrs.get("fetch_seconds", 0.0)
+    return load_demo(), [], "Curated demo", 0.0
 
-df, failures, mode = get_data(live, days)
+if live:
+    with st.status("Refreshing trusted sources…", expanded=False) as refresh_status:
+        df, failures, mode, fetch_seconds = get_data(live, days)
+        refresh_status.update(label=f"Refresh completed in {fetch_seconds:.1f}s", state="complete")
+else:
+    df, failures, mode, fetch_seconds = get_data(live, days)
 df["published"] = pd.to_datetime(df["published"], utc=True)
 
 topics = sorted(df["topic"].unique())
@@ -84,9 +90,8 @@ with tabs[2]:
     st.subheader("Emerging trend radar")
     trend_df = trends(view)
     if not trend_df.empty:
-        fig = px.scatter(trend_df, x="signals", y="momentum", size="avg_score", color="topic", hover_name="topic", labels={"signals":"Signal volume", "momentum":"7-day momentum", "avg_score":"Relevance"})
-        fig.update_layout(height=440, legend_title_text="Topic")
-        st.plotly_chart(fig, width="stretch")
+        chart_data = trend_df.rename(columns={"signals":"Signal volume", "momentum":"7-day momentum", "avg_score":"Relevance", "topic":"Topic"})
+        st.scatter_chart(chart_data, x="Signal volume", y="7-day momentum", size="Relevance", color="Topic", height=440)
         st.dataframe(trend_df.rename(columns={"topic":"Trend", "signals":"Signals", "avg_score":"Avg relevance", "momentum":"Momentum"}), hide_index=True, width="stretch")
         st.caption("Projection is directional, not a forecast: momentum compares recent signal volume with older items in the selected window.")
 
@@ -110,4 +115,5 @@ with tabs[5]:
     st.markdown("**Top 1% interpretation:** a deliberately small allowlist of primary or established technical sources, followed by deduplication and relevance ranking. It does not claim a mathematically measured percentile of the entire web.")
     st.markdown("**Quality controls:** visible source links, no fabricated citations, transparent score factors, graceful feed failure, and separate facts from directional projections.")
 
-st.caption(f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · Educational decision support; verify important claims at the linked primary source.")
+render_seconds = perf_counter() - APP_STARTED
+st.caption(f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · Page render {render_seconds:.2f}s · Educational decision support; verify important claims at the linked primary source.")

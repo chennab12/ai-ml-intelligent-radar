@@ -16,4 +16,3 @@ def test_demo_pipeline():
     assert {"title", "topic", "score", "tpm_takeaway"}.issubset(df.columns)
     assert not trends(df).empty
     assert len(ideas(df)) >= 6
-

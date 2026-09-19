@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +16,8 @@ from dateutil import parser as date_parser
 from .config import SOURCES, TOPICS
 
 UA = {"User-Agent": "AI-ML-TPM-Radar/1.0 (+educational dashboard)"}
+CACHE_DIR = Path("/tmp/ai_ml_tpm_radar")
+CACHE_FILE = CACHE_DIR / "last_good_live.csv"
 
 
 def _text(value: str) -> str:
@@ -60,38 +64,75 @@ def explain(title: str, summary: str, topic: str) -> tuple[str, str, str]:
     return sentence, takeaway, action
 
 
+def _fetch_source(source: dict, days: int, per_source: int, now: datetime) -> list[dict]:
+    """Fetch one source. Designed to run in a bounded worker thread."""
+    response = requests.get(source["url"], headers=UA, timeout=(2, 4))
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
+    if feed.bozo and not feed.entries:
+        raise ValueError(str(feed.bozo_exception))
+    rows = []
+    for entry in feed.entries[:per_source]:
+        published = _date(entry)
+        age_days = max(0, (now - published.astimezone(timezone.utc)).days)
+        if age_days > days:
+            continue
+        title = _text(entry.get("title", "Untitled"))
+        summary = _text(entry.get("summary") or entry.get("description") or "")
+        topic = classify(f"{title} {summary}")
+        meaning, takeaway, action = explain(title, summary, topic)
+        rows.append({
+            "id": hashlib.sha1((title + entry.get("link", "")).encode()).hexdigest()[:12],
+            "published": published,
+            "source": source["name"], "source_type": source["kind"], "tier": source["tier"],
+            "topic": topic, "title": title, "summary": meaning,
+            "tpm_takeaway": takeaway, "recommended_action": action,
+            "link": entry.get("link", ""), "score": score_item(title, summary, age_days, source["tier"]),
+        })
+    return rows
+
+
+def _save_last_good(df: pd.DataFrame) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = CACHE_FILE.with_suffix(".tmp")
+        df.to_csv(temporary, index=False)
+        temporary.replace(CACHE_FILE)
+    except OSError:
+        pass  # Cache is an optimization, never a reason to fail the dashboard.
+
+
+def _load_last_good() -> pd.DataFrame:
+    try:
+        return pd.read_csv(CACHE_FILE, parse_dates=["published"])
+    except (OSError, ValueError, pd.errors.EmptyDataError):
+        return pd.DataFrame()
+
+
 def fetch_news(days: int = 30, per_source: int = 12) -> tuple[pd.DataFrame, list[str]]:
+    """Fetch trusted feeds concurrently; worst-case wait is about one timeout window."""
+    started = time.perf_counter()
     now = datetime.now(timezone.utc)
     rows, errors = [], []
-    for source in SOURCES:
-        try:
-            response = requests.get(source["url"], headers=UA, timeout=10)
-            response.raise_for_status()
-            feed = feedparser.parse(response.content)
-            if feed.bozo and not feed.entries:
-                raise ValueError(str(feed.bozo_exception))
-            for entry in feed.entries[:per_source]:
-                published = _date(entry)
-                age_days = max(0, (now - published.astimezone(timezone.utc)).days)
-                if age_days > days:
-                    continue
-                title = _text(entry.get("title", "Untitled"))
-                summary = _text(entry.get("summary") or entry.get("description") or "")
-                topic = classify(f"{title} {summary}")
-                meaning, takeaway, action = explain(title, summary, topic)
-                rows.append({
-                    "id": hashlib.sha1((title + entry.get("link", "")).encode()).hexdigest()[:12],
-                    "published": published,
-                    "source": source["name"], "source_type": source["kind"], "tier": source["tier"],
-                    "topic": topic, "title": title, "summary": meaning,
-                    "tpm_takeaway": takeaway, "recommended_action": action,
-                    "link": entry.get("link", ""), "score": score_item(title, summary, age_days, source["tier"]),
-                })
-        except Exception as exc:
-            errors.append(f"{source['name']}: {type(exc).__name__}")
+    with ThreadPoolExecutor(max_workers=min(6, len(SOURCES))) as pool:
+        futures = {pool.submit(_fetch_source, source, days, per_source, now): source for source in SOURCES}
+        for future in as_completed(futures):
+            source = futures[future]
+            try:
+                rows.extend(future.result())
+            except Exception as exc:
+                errors.append(f"{source['name']}: {type(exc).__name__}")
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.drop_duplicates(subset=["title"]).sort_values(["score", "published"], ascending=False)
+        df.attrs["data_mode"] = "Live"
+        _save_last_good(df)
+    else:
+        df = _load_last_good()
+        if not df.empty:
+            df.attrs["data_mode"] = "Last successful live refresh"
+            errors.append("All current feeds unavailable; showing last successful refresh")
+    df.attrs["fetch_seconds"] = round(time.perf_counter() - started, 2)
     return df, errors
 
 
@@ -129,4 +170,3 @@ def ideas(df: pd.DataFrame) -> list[dict]:
     ]
     ranked = sorted(candidates, key=lambda x: (x[1] in present, x[4] == "Very high"), reverse=True)
     return [{"idea": a, "trigger": b, "value": c, "effort": d, "impact": e, "first_step": "Create a 10-ticket or 10-run pilot; require citations, human approval, and a measurable KPI."} for a,b,c,d,e in ranked]
-

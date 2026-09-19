@@ -12,6 +12,10 @@ A beginner-friendly Streamlit dashboard that converts trusted AI/ML news into co
 - Curated allowlist of primary and established technical sources
 - Offline demo mode plus optional live RSS refresh
 - Search and topic filters, responsive layout, source links, caching, and graceful partial-feed failure
+- Concurrent feed retrieval with short connect/read timeouts
+- Last-known-good live-data fallback when every current feed is unavailable
+- Lightweight built-in Streamlit chart instead of the larger Plotly dependency
+- Visible refresh and page-render timing diagnostics
 
 ## Run locally
 
@@ -25,7 +29,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The dashboard opens in demo mode so startup does not depend on the internet. Turn on **Refresh trusted live feeds** in the sidebar to collect current items.
+The dashboard opens in demo mode so startup does not depend on the internet. Turn on **Refresh trusted live feeds** in the sidebar to collect current items. Feeds are fetched concurrently, so one slow source cannot create a chain of seven sequential 10-second waits.
 
 ## Deploy on Streamlit Community Cloud
 
@@ -40,6 +44,7 @@ The dashboard opens in demo mode so startup does not depend on the internet. Tur
 - The app uses extractive/rule-based simplification so it works without paid APIs and does not fabricate summaries or citations.
 - Trend “projection” is labeled directional and based on signal momentum, not presented as a statistical forecast.
 - RSS failures are isolated; one unavailable source cannot crash the dashboard.
+- The `/tmp` last-known-good cache is intentionally disposable and safe for Streamlit Community Cloud restarts.
 
 ## Extending it
 
@@ -50,4 +55,3 @@ Add a source in `radar/config.py`. For production, persist normalized items in S
 ```bash
 python -m pytest -q
 ```
-
